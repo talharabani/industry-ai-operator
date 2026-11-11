@@ -1,41 +1,51 @@
 import { Pool } from 'pg';
-import { getServerConfig } from './config.ts';
+import { getServerConfig, parseDbConfig } from './config.ts';
 import { cleanQuotedReplyText } from './routine-evaluator.ts';
 export const stripQuotedThreadHistory = cleanQuotedReplyText;
 
 declare global {
-  var __orderIssuesPgPool: Pool | undefined;
+  var __pgPool: Pool | undefined;
+  var __pgPoolUrl: string | undefined;
+}
+
+function getSharedPool(): Pool | null {
+  const config = getServerConfig();
+  if (!config.isDatabaseConfigured) return null;
+
+  if (global.__pgPool && global.__pgPoolUrl !== config.databaseUrl) {
+    global.__pgPool.end().catch(() => {});
+    global.__pgPool = undefined;
+    global.__pgPoolUrl = undefined;
+  }
+
+  if (!global.__pgPool) {
+    global.__pgPool = new Pool({
+      ...parseDbConfig(config.databaseUrl),
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    });
+    global.__pgPoolUrl = config.databaseUrl;
+  }
+
+  return global.__pgPool;
 }
 
 export async function query<T = any>(sql: string, params: any[] = []): Promise<T[]> {
-  const config = getServerConfig();
-  if (!config.databaseUrl) return [];
-  if (!global.__orderIssuesPgPool) {
-    global.__orderIssuesPgPool = new Pool({
-      connectionString: config.databaseUrl,
-      max: 10,
-      idleTimeoutMillis: 30000,
-    });
-  }
-  const res = await global.__orderIssuesPgPool.query(sql, params);
+  const pool = getSharedPool();
+  if (!pool) return [];
+  const res = await pool.query(sql, params);
   return res.rows as T[];
 }
 
 export async function withTransaction<T>(
   callback: (client: any) => Promise<T>
 ): Promise<T> {
-  const config = getServerConfig();
-  if (!config.databaseUrl) {
+  const pool = getSharedPool();
+  if (!pool) {
     throw new Error('Database is not configured');
   }
-  if (!global.__orderIssuesPgPool) {
-    global.__orderIssuesPgPool = new Pool({
-      connectionString: config.databaseUrl,
-      max: 10,
-      idleTimeoutMillis: 30000,
-    });
-  }
-  const client = await global.__orderIssuesPgPool.connect();
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const result = await callback(client);

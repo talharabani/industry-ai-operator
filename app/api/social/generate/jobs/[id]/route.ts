@@ -1,9 +1,10 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import { getAuthSession, requireWorkspaceAccess } from '@/lib/auth';
 import { getSocialGenerationJob, updateSocialGenerationJob } from '@/lib/social-db';
 import { runSocialGenerationPipeline } from '@/lib/social-generator';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export async function GET(
   request: NextRequest,
@@ -69,14 +70,14 @@ export async function POST(
         error_message: null,
       });
 
-      // Run pipeline asynchronously
-      (async () => {
+      // Run pipeline asynchronously via Next.js after() (Vercel-safe)
+      after(async () => {
         try {
           await runSocialGenerationPipeline(id);
         } catch (retryErr) {
           console.error('[Social Jobs Retry] Pipeline error:', retryErr);
         }
-      })();
+      });
 
       return NextResponse.json({
         success: true,

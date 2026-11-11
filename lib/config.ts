@@ -52,3 +52,28 @@ export function getServerConfig() {
     isN8nConfigured: Boolean(n8nBaseUrl),
   };
 }
+
+export function parseDbConfig(connectionString: string) {
+  try {
+    const parsed = new URL(connectionString);
+    const host = parsed.hostname || 'localhost';
+    const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    const sslMode = parsed.searchParams.get('sslmode');
+    const requiresSsl =
+      sslMode === 'require' ||
+      sslMode === 'verify-full' ||
+      sslMode === 'verify-ca' ||
+      (!isLocal && sslMode !== 'disable');
+
+    return {
+      user: decodeURIComponent(parsed.username || 'iao_demo'),
+      password: decodeURIComponent(parsed.password || ''),
+      host,
+      port: parseInt(parsed.port || '5432', 10),
+      database: parsed.pathname.replace(/^\//, '') || 'iao_demo',
+      ...(requiresSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+    };
+  } catch {
+    return { connectionString };
+  }
+}

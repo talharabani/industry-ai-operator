@@ -24,7 +24,8 @@ export interface ShopifyOAuthConfig {
 export function getShopifyOAuthConfig(origin?: string): ShopifyOAuthConfig | null {
   const clientId = (process.env.SHOPIFY_API_KEY || process.env.SHOPIFY_CLIENT_ID || '').trim();
   const clientSecret = (process.env.SHOPIFY_API_SECRET || process.env.SHOPIFY_CLIENT_SECRET || '').trim();
-  const appUrl = (process.env.SHOPIFY_APP_URL || origin || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+  const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '';
+  const appUrl = (process.env.SHOPIFY_APP_URL || origin || process.env.NEXT_PUBLIC_APP_URL || vercelUrl || 'http://localhost:3000').replace(/\/+$/, '');
   const apiVersion = process.env.SHOPIFY_API_VERSION || DEFAULT_SHOPIFY_API_VERSION;
 
   if (!clientId || !clientSecret) {

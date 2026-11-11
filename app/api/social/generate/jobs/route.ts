@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import { getAuthSession, requireWorkspaceAccess } from '@/lib/auth';
 import {
   createSocialGenerationJob,
@@ -7,6 +7,7 @@ import {
 import { runSocialGenerationPipeline } from '@/lib/social-generator';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
   try {
@@ -57,33 +58,36 @@ export async function POST(request: NextRequest) {
       session.user_id || 'owner'
     );
 
-    // 3. Trigger n8n Webhook asynchronously
-    const n8nBaseUrl = process.env.N8N_BASE_URL || 'http://localhost:5678';
+    // 3. Trigger n8n Webhook or direct server-side pipeline via Next.js after() (Vercel-safe)
+    const n8nBaseUrl = process.env.N8N_BASE_URL || '';
     const cronSecret = process.env.CRON_SECRET || 'dev-secret';
+    const shouldCallN8n = Boolean(n8nBaseUrl && (!process.env.VERCEL || !n8nBaseUrl.includes('localhost')));
 
-    (async () => {
+    after(async () => {
       let triggeredN8n = false;
-      try {
-        const webhookUrl = `${n8nBaseUrl}/webhook/social-generate-post`;
-        const n8nRes = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-n8n-operator-key': cronSecret,
-          },
-          body: JSON.stringify({
-            job_id: job.id,
-            tenant_id: tenantId,
-            timestamp: new Date().toISOString(),
-          }),
-        });
+      if (shouldCallN8n) {
+        try {
+          const webhookUrl = `${n8nBaseUrl.replace(/\/+$/, '')}/webhook/social-generate-post`;
+          const n8nRes = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-n8n-operator-key': cronSecret,
+            },
+            body: JSON.stringify({
+              job_id: job.id,
+              tenant_id: tenantId,
+              timestamp: new Date().toISOString(),
+            }),
+            signal: AbortSignal.timeout(5000),
+          });
 
-        if (n8nRes.ok) {
-          triggeredN8n = true;
+          if (n8nRes.ok) {
+            triggeredN8n = true;
+          }
+        } catch (webhookErr) {
+          console.warn('[Social Jobs] n8n webhook notification skipped, executing pipeline directly:', webhookErr);
         }
-      } catch (webhookErr) {
-        // Fall back to direct background pipeline execution if n8n webhook is unreachable
-        console.warn('[Social Jobs] n8n webhook notification skipped, executing pipeline directly:', webhookErr);
       }
 
       // If n8n webhook did not process it directly, execute server-side pipeline to ensure job completes
@@ -94,7 +98,7 @@ export async function POST(request: NextRequest) {
           console.error('[Social Jobs] Pipeline execution error:', pipelineErr);
         }
       }
-    })();
+    });
 
     // 4. Return job ID promptly to dashboard
     return NextResponse.json({

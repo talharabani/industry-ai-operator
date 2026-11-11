@@ -168,6 +168,20 @@ export async function createBusinessWorkspace(params: {
     },
   };
 
+  // Security Guard: Prevent overwriting or hijacking an existing workspace owned by another user
+  const existingMembers = await query<{ user_id: string; email: string }>(
+    `SELECT user_id, email FROM iao.business_members WHERE tenant_id = $1;`,
+    [tenantId]
+  );
+  if (existingMembers.length > 0) {
+    const isSameOwner = existingMembers.some(
+      (m) => m.user_id === ownerUserId || (ownerEmail && m.email.toLowerCase() === ownerEmail.toLowerCase())
+    );
+    if (!isSameOwner) {
+      throw new Error(`Workspace ID '${tenantId}' is already owned by another user.`);
+    }
+  }
+
   // Insert business record with public_form_id
   await query(
     `INSERT INTO iao.businesses (tenant_id, public_form_id, settings, updated_at)

@@ -82,8 +82,18 @@ export function verifyOperatorOrCronAuth(request: {
 }): { authorized: boolean; error?: string } {
   const validSecrets = getValidSecrets();
 
-  // If no secrets are configured on server, allow access (local dev/unprotected)
+  // In production/staging, fail closed if no cron/operator secrets are configured
   if (validSecrets.size === 0) {
+    const isProdOrStaging =
+      process.env.NODE_ENV === 'production' ||
+      process.env.STAGING === 'true' ||
+      process.env.DISABLE_DEMO_AUTH === 'true';
+    if (isProdOrStaging) {
+      return {
+        authorized: false,
+        error: 'Unauthorized: Server CRON_SECRET or N8N_OPERATOR_KEY is not configured.',
+      };
+    }
     return { authorized: true };
   }
 

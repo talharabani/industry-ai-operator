@@ -1,5 +1,5 @@
 import { Pool, type QueryResultRow } from 'pg';
-import { getServerConfig } from './config.ts';
+import { getServerConfig, parseDbConfig } from './config.ts';
 import type {
   BusinessRecord,
   BusinessSettings,
@@ -65,21 +65,6 @@ export { authorizeOrderIssueAction, recordManualActionExecution, withTransaction
 declare global {
   var __pgPool: Pool | undefined;
   var __pgPoolUrl: string | undefined;
-}
-
-function parseDbConfig(connectionString: string) {
-  try {
-    const parsed = new URL(connectionString);
-    return {
-      user: decodeURIComponent(parsed.username || 'iao_demo'),
-      password: decodeURIComponent(parsed.password || ''),
-      host: parsed.hostname || 'localhost',
-      port: parseInt(parsed.port || '5433', 10),
-      database: parsed.pathname.replace(/^\//, '') || 'iao_demo',
-    };
-  } catch {
-    return { connectionString };
-  }
 }
 
 function getPool(): Pool | null {

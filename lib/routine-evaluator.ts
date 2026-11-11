@@ -241,8 +241,8 @@ export function extractOrderReference(text: string): ExtractedOrderRef | null {
  * Deterministically matches an extracted order reference against an OrderRecord
  * while strictly isolating demo ORD- prefixes from Shopify / numeric orders.
  */
-export function matchOrderRecord(order: OrderRecord, ref: ExtractedOrderRef): boolean {
-  if (!order || !order.order_id) return false;
+export function matchOrderRecord(order: OrderRecord, ref: ExtractedOrderRef | null): boolean {
+  if (!order || !order.order_id || !ref) return false;
 
   const rawOrderId = (order.order_id || '').trim();
   const upperOrderId = rawOrderId.toUpperCase();

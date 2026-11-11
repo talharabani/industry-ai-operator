@@ -10,7 +10,8 @@ export interface GoogleOAuthConfig {
 export function getGoogleOAuthConfig(origin?: string): GoogleOAuthConfig | null {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '';
+  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || vercelUrl || '').trim().replace(/\/+$/, '');
   const stagingCallback = appUrl ? `${appUrl}/api/auth/google/callback` : null;
   const defaultRedirect = stagingCallback || (origin
     ? `${origin}/api/auth/google/callback`

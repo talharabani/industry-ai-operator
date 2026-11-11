@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
 import { getAuthSession, encodeSessionCookie, SESSION_COOKIE_NAME } from '@/lib/auth';
 import { createBusinessWorkspace } from '@/lib/services-pack';
+import { query } from '@/lib/db';
 import { IndustryType, BusinessType } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -25,6 +27,10 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const session = await getAuthSession();
+    if (!session.user_id) {
+      return NextResponse.json({ error: 'Unauthorized: Please sign in before creating a workspace.' }, { status: 401 });
+    }
+
     const body = await request.json().catch(() => ({}));
     const {
       business_name,
@@ -47,10 +53,23 @@ export async function POST(request: NextRequest) {
     const resolvedType: BusinessType = business_type || (industry === 'ecommerce' ? 'ecommerce' : industry === 'blog' ? 'blog' : 'services');
     const resolvedIndustry: IndustryType = (industry as IndustryType) || (resolvedType === 'ecommerce' ? 'ecommerce' : resolvedType === 'blog' ? 'blog' : 'services');
 
-    const slug = cleanName
+    const baseSlug = cleanName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '') || `biz-${Date.now().toString(36)}`;
+
+    let slug = baseSlug;
+    try {
+      const existing = await query<{ tenant_id: string }>(
+        `SELECT tenant_id FROM iao.businesses WHERE tenant_id = $1 LIMIT 1;`,
+        [baseSlug]
+      );
+      if (existing.length > 0) {
+        slug = `${baseSlug}-${crypto.randomBytes(2).toString('hex')}`;
+      }
+    } catch {
+      // If DB check fails, proceed with unique suffix safety if needed
+    }
 
     // Create the business workspace and register authenticated user as owner
     const businessRecord = await createBusinessWorkspace({
