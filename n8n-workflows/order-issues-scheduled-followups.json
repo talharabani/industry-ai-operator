@@ -1,0 +1,188 @@
+{
+  "name": "Industry AI Operator - Order Issues Scheduled Follow-ups",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-trigger",
+      "name": "Schedule (Every 30 Min)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        280
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "node-manual-trigger",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/cron/order-issues/followup",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "retry": {
+            "retry": {
+              "maxTries": 3,
+              "waitBetweenTries": 5000
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "node-http-followup",
+      "name": "Process Due Order Issue Follow-ups",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        360
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-followup-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-if-success",
+      "name": "Check Followup Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        740,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract follow-up summary for reporting\nconst result = $input.first().json;\nconst claimed = result.claimed_count || 0;\nconst completed = result.completed_count || 0;\nconst escalated = result.escalated_count || 0;\nconst cancelled = result.cancelled_count || 0;\n\nconsole.log(`[Order Issue Follow-ups] Processed ${claimed} due jobs (${completed} completed, ${escalated} escalated to owner, ${cancelled} cancelled).`);\n\nreturn [{\n  json: {\n    outcome: 'success',\n    processed_at: new Date().toISOString(),\n    claimed_count: claimed,\n    completed_count: completed,\n    escalated_count: escalated,\n    cancelled_count: cancelled,\n    details: result.results || {}\n  }\n}];"
+      },
+      "id": "node-followup-success-log",
+      "name": "Log Followup Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format failure alert\nconst errorPayload = $input.first().json;\nconsole.error('[Order Issue Followup Failure Alert]', JSON.stringify(errorPayload));\n\nreturn [{\n  json: {\n    outcome: 'failed',\n    failed_at: new Date().toISOString(),\n    error_payload: errorPayload,\n    alert_message: `Order issue follow-up failed: ${errorPayload.error || errorPayload.message || 'Unknown error'}`\n  }\n}];"
+      },
+      "id": "node-followup-failure-alert",
+      "name": "Handle Followup Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule (Every 30 Min)": {
+      "main": [
+        [
+          {
+            "node": "Process Due Order Issue Follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Process Due Order Issue Follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Due Order Issue Follow-ups": {
+      "main": [
+        [
+          {
+            "node": "Check Followup Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Followup Status": {
+      "main": [
+        [
+          {
+            "node": "Log Followup Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Followup Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

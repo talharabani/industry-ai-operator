@@ -1,0 +1,1114 @@
+{
+  "id": "wf-custom-store-sync",
+  "name": "Industry AI Operator - Custom Store Sync Orchestration",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "node-cs-schedule-trigger",
+      "name": "CS Trigger: Schedule Hourly",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "node-cs-manual-trigger",
+      "name": "CS Trigger: Manual Execution",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const scopeRes = $input.first()?.json || {};\nlet manualInput = {};\ntry {\n  manualInput = $('CS Trigger: Manual Execution')?.first()?.json || {};\n} catch (e) {\n  manualInput = {};\n}\n\nconst targetTenant = manualInput.tenant_id || manualInput.target_tenant_id || scopeRes.sandbox_tenant_id;\nconst targetConn = manualInput.connection_id || manualInput.target_connection_id || scopeRes.target_connection_id || '';\n\nif (!targetTenant || !targetTenant.trim()) {\n  throw new Error('Missing required target_tenant_id scope for Custom Store Sync. In sandbox mode, explicit authorized tenant configuration or active sandbox-scope is required. Refusing to process un-scoped stores.');\n}\n\nreturn [\n  {\n    json: {\n      target_tenant_id: targetTenant.trim(),\n      target_connection_id: targetConn.trim(),\n      page_limit: manualInput.page_limit || 50,\n      max_pages_per_run: manualInput.max_pages_per_run || 5,\n      is_sandbox: Boolean(scopeRes.mock !== undefined ? scopeRes.mock : true)\n    }\n  }\n];"
+      },
+      "id": "node-cs-config",
+      "name": "CS Config: Store Connection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://host.docker.internal:3000/api/custom-store/sync/connections?tenant_id={{ $json.target_tenant_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cs-enum-connections",
+      "name": "CS HTTP: Enumerate Active Connections",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        340
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $('CS Config: Store Connection').first().json;\nconst response = $input.first().json;\n\n// Distinguish HTTP / network / auth failure from zero connections\nconst isHttpError = Boolean(\n  !response ||\n  response.error ||\n  response.success === false ||\n  response.statusCode >= 400 ||\n  (typeof response.message === 'string' && response.message.includes('Unauthorized'))\n);\n\nif (isHttpError) {\n  const errMsg = (typeof response?.error === 'string' ? response.error : response?.error?.message) || response?.message || (response?.error ? JSON.stringify(response.error) : 'Authentication or network error while enumerating connections.');\n  return [{\n    json: {\n      is_enumeration_error: true,\n      error_message: errMsg,\n      has_connections: false,\n      tenant_id: config.target_tenant_id,\n      connections: [],\n      connection_index: 0,\n      total_connections: 0\n    }\n  }];\n}\n\nconst connections = Array.isArray(response.connections) ? response.connections : [];\nlet targets = connections.filter(c => c.is_connected === true);\n\nif (config.target_connection_id && config.target_connection_id.trim()) {\n  targets = targets.filter(c => c.connection_id === config.target_connection_id.trim());\n}\n\nif (targets.length === 0) {\n  return [{\n    json: {\n      is_enumeration_error: false,\n      has_connections: false,\n      message: 'No active custom store connections found to synchronize.',\n      tenant_id: config.target_tenant_id,\n      connections: [],\n      connection_index: 0,\n      total_connections: 0\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    is_enumeration_error: false,\n    has_connections: true,\n    tenant_id: config.target_tenant_id,\n    connections: targets.map(c => ({\n      connection_id: c.connection_id,\n      tenant_id: c.tenant_id,\n      store_name: c.store_name,\n      api_base_url: c.api_base_url,\n      page_limit: config.page_limit || 50,\n      max_pages_per_run: config.max_pages_per_run || 5\n    })),\n    connection_index: 0,\n    total_connections: targets.length,\n    overall_results: [],\n    overall_has_failures: false\n  }\n}];"
+      },
+      "id": "node-cs-resolve-connections",
+      "name": "CS Code: Resolve Target Connections",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-has-connections",
+              "leftValue": "={{ $json.has_connections }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-cs-if-has-connections",
+      "name": "CS If: Has Active Connections",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nif (item.is_enumeration_error) {\n  console.error('[Custom Store Sync ENUMERATION FAILED] ' + item.error_message);\n  throw new Error('Enumeration failed: ' + item.error_message);\n}\nconsole.log('[Custom Store Sync SKIPPED] ' + (item.message || 'No active connections.'));\nreturn [{ json: { status: 'skipped', reason: item.message || 'No active connections' } }];"
+      },
+      "id": "node-cs-handle-enum-failure-or-skip",
+      "name": "CS Code: Handle Enum Failure Or Skip",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.first().json;\nconst idx = state.connection_index || 0;\nconst conn = state.connections[idx];\n\nif (!conn) {\n  throw new Error('Connection at index ' + idx + ' is out of bounds');\n}\n\nreturn [{\n  json: {\n    ...state,\n    current_connection: conn,\n    tenant_id: conn.tenant_id,\n    connection_id: conn.connection_id,\n    store_name: conn.store_name,\n    page_limit: conn.page_limit,\n    max_pages_per_run: conn.max_pages_per_run\n  }\n}];"
+      },
+      "id": "node-cs-pick-connection",
+      "name": "CS Code: Pick Current Connection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/custom-store/sync/start",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"tenant_id\": \"{{ $json.tenant_id }}\",\n  \"connection_id\": \"{{ $json.connection_id }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cs-start-job",
+      "name": "CS HTTP: Start Sync Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1640,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const startRes = $input.first().json;\nconst connState = $('CS Code: Pick Current Connection').first().json;\nconst conn = connState.current_connection;\n\nconst isStartFailed = Boolean(!startRes || startRes.error || startRes.success === false || !startRes.job_id);\n\nif (isStartFailed) {\n  const errMsg = (typeof startRes?.error === 'string' ? startRes.error : startRes?.error?.message) || startRes?.message || (startRes?.error ? JSON.stringify(startRes.error) : 'Failed to start sync job (network or API error)');\n  return [{\n    json: {\n      ...connState,\n      job_id: startRes?.job_id || ('failed_start_' + conn.connection_id),\n      tenant_id: conn.tenant_id,\n      connection_id: conn.connection_id,\n      store_name: conn.store_name,\n      start_failed: true,\n      page: 1,\n      limit: conn.page_limit || 50,\n      max_pages: conn.max_pages_per_run || 5,\n      has_next_page: false,\n      products_synced: 0,\n      orders_synced: 0,\n      errors_count: 1,\n      error_details: [{\n        stage: 'start',\n        message: 'Start sync job failed for connection ' + conn.connection_id + ': ' + errMsg,\n        timestamp: new Date().toISOString()\n      }],\n      status: 'failed',\n      loop_next: false,\n      checkpoint: {},\n      products_pages_processed: 0,\n      product_checkpoint: {}\n    }\n  }];\n}\n\nconst checkpoint = startRes.checkpoint || {};\nconst resumeProductPage = (checkpoint.products_next_page && typeof checkpoint.products_next_page === 'number')\n  ? checkpoint.products_next_page\n  : 1;\n\nreturn [{\n  json: {\n    ...connState,\n    job_id: startRes.job_id,\n    tenant_id: startRes.tenant_id || conn.tenant_id,\n    connection_id: startRes.connection_id || conn.connection_id,\n    store_name: startRes.store_name || conn.store_name,\n    start_failed: false,\n    page: resumeProductPage,\n    limit: conn.page_limit || startRes.page_size || 50,\n    max_pages: conn.max_pages_per_run || startRes.max_pages_per_run || 5,\n    has_next_page: true,\n    products_synced: 0,\n    orders_synced: 0,\n    errors_count: 0,\n    error_details: [],\n    status: 'completed',\n    loop_next: true,\n    checkpoint: checkpoint,\n    products_pages_processed: 0,\n    product_checkpoint: {}\n  }\n}];"
+      },
+      "id": "node-cs-init-products",
+      "name": "CS Code: Init Products Pagination",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1880,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-should-fetch-products",
+              "leftValue": "={{ $json.start_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-cs-if-should-fetch-products",
+      "name": "CS If: Should Fetch Products?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2120,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.first().json;\nreturn [{\n  json: {\n    ...state,\n    target_page: state.page || 1\n  }\n}];"
+      },
+      "id": "node-cs-prepare-products-page-req",
+      "name": "CS Code: Prepare Products Page Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2360,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://host.docker.internal:3000/api/custom-store/sync/fetch-page?job_id={{ $json.job_id }}&resource_type=products&page={{ $json.target_page }}&limit={{ $json.limit }}&max_pages={{ $json.max_pages }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cs-fetch-products",
+      "name": "CS HTTP: Fetch Products Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const reqState = $('CS Code: Prepare Products Page Request').first().json;\nconst response = $input.first().json;\n\nconst prevStatus = reqState.status || 'completed';\nconst prevErrors = Array.isArray(reqState.error_details) ? [...reqState.error_details] : [];\nconst productsSynced = reqState.products_synced || 0;\nconst ordersSynced = reqState.orders_synced || 0;\nconst currentPage = reqState.target_page || reqState.page || 1;\n\n// 1. Detect HTTP / network / 500 / 401 failure\nconst isHttpFailure = Boolean(!response || response.error || response.success === false || response.statusCode >= 400);\n\nif (isHttpFailure) {\n  const errMsg = (typeof response?.error === 'string' ? response.error : response?.error?.message) || response?.message || (response?.error ? JSON.stringify(response.error) : 'HTTP error fetching products page');\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'products_fetch',\n      page: currentPage,\n      message: 'HTTP failure on products page ' + currentPage + ': ' + errMsg,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: [],\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\n// 2. Validate payload data structure\nconst data = response.data;\nif (!data || typeof data !== 'object') {\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'products_validate',\n      page: currentPage,\n      message: 'Missing or null data payload in fetch products response for page ' + currentPage,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: [],\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\nconst products = data.products;\nif (!Array.isArray(products)) {\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'products_validate',\n      page: currentPage,\n      message: 'Malformed response: products field is not an array on page ' + currentPage,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: [],\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\n// 3. Validate pagination metadata: has_next_page is a REQUIRED boolean!\nif (!data.pagination || typeof data.pagination !== 'object' || typeof data.pagination.has_next_page !== 'boolean') {\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'products_validate',\n      page: currentPage,\n      message: 'Missing or invalid pagination metadata: pagination.has_next_page must be a boolean on page ' + currentPage,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: products,\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\nconst hasNext = data.pagination.has_next_page;\nconst currentStatus = (prevStatus === 'failed' || prevStatus === 'partial_failed') ? prevStatus : 'completed';\n\nreturn [{\n  json: {\n    ...reqState,\n    items: products,\n    has_next_page: hasNext,\n    is_fatal_error: false,\n    should_submit_batch: true,\n    status: currentStatus,\n    error_details: prevErrors,\n    errors_count: prevErrors.length,\n    products_synced: productsSynced,\n    orders_synced: ordersSynced\n  }\n}];"
+      },
+      "id": "node-cs-validate-products",
+      "name": "CS Code: Validate Products Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-submit-products-batch",
+              "leftValue": "={{ $json.should_submit_batch }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-cs-if-submit-products-batch",
+      "name": "CS If: Submit Products Batch?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/custom-store/sync/batch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.job_id }}\",\n  \"resource_type\": \"products\",\n  \"page\": {{ $json.target_page }},\n  \"limit\": {{ $json.limit }},\n  \"max_pages\": {{ $json.max_pages }},\n  \"has_next_page\": {{ $json.has_next_page }},\n  \"status\": \"{{ $json.status }}\",\n  \"error_details\": {{ JSON.stringify($json.error_details || []) }},\n  \"items\": {{ JSON.stringify($json.items || []) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cs-submit-products",
+      "name": "CS HTTP: Submit Products Batch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3320,
+        140
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const validatedState = $('CS Code: Validate Products Page').first().json;\nconst batchRes = $input.first().json;\n\nconst page = validatedState.target_page || validatedState.page || 1;\nconst maxPages = validatedState.max_pages || 5;\nconst hasNextPage = Boolean(validatedState.has_next_page);\n\nlet status = validatedState.status || 'completed';\nlet errorDetails = Array.isArray(validatedState.error_details) ? [...validatedState.error_details] : [];\nlet productsSynced = validatedState.products_synced || 0;\nlet productCheckpoint = validatedState.product_checkpoint || {};\nlet loopNext = false;\nlet pagesProcessed = validatedState.products_pages_processed || 0;\n\n// Strict API Contract & Batch Validation:\n// Accept a batch response ONLY when:\n// 1. success === true\n// 2. processed_count is a finite, non-negative integer\n// 3. no HTTP/API/item failure is present\n// Treat {}, missing success, missing processed_count, null, strings, negative numbers and invalid numeric values as malformed failures.\nlet isBatchValid = false;\nlet failureReason = '';\n\nif (!validatedState.should_submit_batch) {\n  failureReason = 'Batch submission skipped due to previous validation or fetch failure';\n} else if (!batchRes || typeof batchRes !== 'object' || Array.isArray(batchRes)) {\n  failureReason = 'Malformed batch response: payload is null, primitive, or not an object';\n} else if (batchRes.error !== undefined) {\n  const errText = (typeof batchRes.error === 'string' ? batchRes.error : batchRes.error?.message) || JSON.stringify(batchRes.error);\n  failureReason = 'Batch HTTP/API error: ' + errText;\n} else if (typeof batchRes.statusCode === 'number' && batchRes.statusCode >= 400) {\n  failureReason = 'Batch HTTP error with status ' + batchRes.statusCode;\n} else if (batchRes.success !== true) {\n  failureReason = 'Malformed batch response: success must be true (received ' + String(batchRes.success) + ')';\n} else if (\n  typeof batchRes.processed_count !== 'number' ||\n  !Number.isFinite(batchRes.processed_count) ||\n  !Number.isInteger(batchRes.processed_count) ||\n  batchRes.processed_count < 0\n) {\n  failureReason = 'Malformed batch response: processed_count must be a finite, non-negative integer (received ' + String(batchRes.processed_count) + ')';\n} else if (typeof batchRes.error_count === 'number' && batchRes.error_count > 0) {\n  const errMsgs = Array.isArray(batchRes.errors) ? batchRes.errors.map(e => (typeof e === 'object' && e !== null) ? (e.message || JSON.stringify(e)) : String(e)).join('; ') : '';\n  failureReason = 'Batch reported item errors (count: ' + batchRes.error_count + '): ' + (errMsgs || 'unspecified item error');\n} else if (Array.isArray(batchRes.errors) && batchRes.errors.length > 0) {\n  const errMsgs = batchRes.errors.map(e => (typeof e === 'object' && e !== null) ? (e.message || JSON.stringify(e)) : String(e)).join('; ');\n  failureReason = 'Batch returned non-empty errors array: ' + errMsgs;\n} else if (batchRes.status === 'failed' || batchRes.status === 'partial_failed') {\n  failureReason = 'Batch returned degraded status: ' + batchRes.status;\n} else {\n  isBatchValid = true;\n}\n\nif (!isBatchValid) {\n  status = (status === 'failed') ? 'failed' : 'partial_failed';\n  errorDetails.push({\n    stage: 'products_batch',\n    page,\n    message: 'Batch failure on products page ' + page + ': ' + failureReason,\n    timestamp: new Date().toISOString()\n  });\n\n  // Preserve the failed page for retry; never advance its checkpoint!\n  productCheckpoint = {\n    resource: 'products',\n    next_page: page,\n    last_page_synced: page > 1 ? page - 1 : 0,\n    has_outstanding: true,\n    timestamp: new Date().toISOString()\n  };\n  loopNext = false;\n} else {\n  // Successful and validated batch submission\n  productsSynced += batchRes.processed_count;\n  pagesProcessed += 1;\n\n  const reachedLimit = pagesProcessed >= maxPages;\n  const hasOutstandingData = hasNextPage && reachedLimit;\n  const shouldContinue = hasNextPage && !reachedLimit && !validatedState.is_fatal_error;\n\n  if (hasOutstandingData) {\n    status = (status === 'failed') ? 'failed' : 'partial_failed';\n    productCheckpoint = {\n      resource: 'products',\n      next_page: page + 1,\n      last_page_synced: page,\n      has_outstanding: true,\n      timestamp: new Date().toISOString()\n    };\n  } else if (!hasNextPage) {\n    productCheckpoint = {\n      resource: 'products',\n      has_outstanding: false\n    };\n  }\n\n  loopNext = shouldContinue;\n}\n\nconst nextTargetPage = (loopNext && !productCheckpoint.has_outstanding) ? page + 1 : page;\n\nreturn [{\n  json: {\n    ...validatedState,\n    page: nextTargetPage,\n    products_synced: productsSynced,\n    products_pages_processed: pagesProcessed,\n    error_details: errorDetails,\n    errors_count: errorDetails.length,\n    status,\n    loop_next: loopNext,\n    product_checkpoint: productCheckpoint,\n    has_outstanding_products: Boolean(productCheckpoint?.has_outstanding)\n  }\n}];"
+      },
+      "id": "node-cs-advance-products",
+      "name": "CS Code: Advance Products Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3560,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-more-products",
+              "leftValue": "={{ $json.loop_next }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-cs-if-more-products",
+      "name": "CS If: More Products?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3800,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prev = $input.first().json;\nconst checkpoint = prev.checkpoint || {};\nconst resumeOrderPage = (checkpoint.orders_next_page && typeof checkpoint.orders_next_page === 'number')\n  ? checkpoint.orders_next_page\n  : 1;\n\nreturn [{\n  json: {\n    ...prev,\n    page: resumeOrderPage,\n    has_next_page: true,\n    loop_next: true,\n    orders_pages_processed: 0,\n    order_checkpoint: {},\n    has_outstanding_orders: false\n  }\n}];"
+      },
+      "id": "node-cs-init-orders",
+      "name": "CS Code: Init Orders Pagination",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4040,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.first().json;\nreturn [{\n  json: {\n    ...state,\n    target_page: state.page || 1\n  }\n}];"
+      },
+      "id": "node-cs-prepare-orders-page-req",
+      "name": "CS Code: Prepare Orders Page Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4280,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://host.docker.internal:3000/api/custom-store/sync/fetch-page?job_id={{ $json.job_id }}&resource_type=orders&page={{ $json.target_page }}&limit={{ $json.limit }}&max_pages={{ $json.max_pages }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cs-fetch-orders",
+      "name": "CS HTTP: Fetch Orders Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4520,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const reqState = $('CS Code: Prepare Orders Page Request').first().json;\nconst response = $input.first().json;\n\nconst prevStatus = reqState.status || 'completed';\nconst prevErrors = Array.isArray(reqState.error_details) ? [...reqState.error_details] : [];\nconst productsSynced = reqState.products_synced || 0;\nconst ordersSynced = reqState.orders_synced || 0;\nconst currentPage = reqState.target_page || reqState.page || 1;\n\n// 1. Detect HTTP / network / 500 / 401 failure\nconst isHttpFailure = Boolean(!response || response.error || response.success === false || response.statusCode >= 400);\n\nif (isHttpFailure) {\n  const errMsg = (typeof response?.error === 'string' ? response.error : response?.error?.message) || response?.message || (response?.error ? JSON.stringify(response.error) : 'HTTP error fetching orders page');\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'orders_fetch',\n      page: currentPage,\n      message: 'HTTP failure on orders page ' + currentPage + ': ' + errMsg,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: [],\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\n// 2. Validate payload data structure\nconst data = response.data;\nif (!data || typeof data !== 'object') {\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'orders_validate',\n      page: currentPage,\n      message: 'Missing or null data payload in fetch orders response for page ' + currentPage,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: [],\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\nconst orders = data.orders;\nif (!Array.isArray(orders)) {\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'orders_validate',\n      page: currentPage,\n      message: 'Malformed response: orders field is not an array on page ' + currentPage,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: [],\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\n// 3. Validate pagination metadata: has_next_page is a REQUIRED boolean!\nif (!data.pagination || typeof data.pagination !== 'object' || typeof data.pagination.has_next_page !== 'boolean') {\n  const updatedErrors = [\n    ...prevErrors,\n    {\n      stage: 'orders_validate',\n      page: currentPage,\n      message: 'Missing or invalid pagination metadata: pagination.has_next_page must be a boolean on page ' + currentPage,\n      timestamp: new Date().toISOString()\n    }\n  ];\n  return [{\n    json: {\n      ...reqState,\n      items: orders,\n      has_next_page: false,\n      is_fatal_error: true,\n      should_submit_batch: false,\n      status: 'partial_failed',\n      error_details: updatedErrors,\n      errors_count: updatedErrors.length,\n      products_synced: productsSynced,\n      orders_synced: ordersSynced\n    }\n  }];\n}\n\nconst hasNext = data.pagination.has_next_page;\nconst currentStatus = (prevStatus === 'failed' || prevStatus === 'partial_failed') ? prevStatus : 'completed';\n\nreturn [{\n  json: {\n    ...reqState,\n    items: orders,\n    has_next_page: hasNext,\n    is_fatal_error: false,\n    should_submit_batch: true,\n    status: currentStatus,\n    error_details: prevErrors,\n    errors_count: prevErrors.length,\n    products_synced: productsSynced,\n    orders_synced: ordersSynced\n  }\n}];"
+      },
+      "id": "node-cs-validate-orders",
+      "name": "CS Code: Validate Orders Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4760,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-submit-orders-batch",
+              "leftValue": "={{ $json.should_submit_batch }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-cs-if-submit-orders-batch",
+      "name": "CS If: Submit Orders Batch?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5000,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/custom-store/sync/batch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.job_id }}\",\n  \"resource_type\": \"orders\",\n  \"page\": {{ $json.target_page }},\n  \"limit\": {{ $json.limit }},\n  \"max_pages\": {{ $json.max_pages }},\n  \"has_next_page\": {{ $json.has_next_page }},\n  \"status\": \"{{ $json.status }}\",\n  \"error_details\": {{ JSON.stringify($json.error_details || []) }},\n  \"items\": {{ JSON.stringify($json.items || []) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cs-submit-orders",
+      "name": "CS HTTP: Submit Orders Batch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5240,
+        140
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const validatedState = $('CS Code: Validate Orders Page').first().json;\nconst batchRes = $input.first().json;\n\nconst page = validatedState.target_page || validatedState.page || 1;\nconst maxPages = validatedState.max_pages || 5;\nconst hasNextPage = Boolean(validatedState.has_next_page);\n\nlet status = validatedState.status || 'completed';\nlet errorDetails = Array.isArray(validatedState.error_details) ? [...validatedState.error_details] : [];\nlet ordersSynced = validatedState.orders_synced || 0;\nlet orderCheckpoint = validatedState.order_checkpoint || {};\nlet loopNext = false;\nlet pagesProcessed = validatedState.orders_pages_processed || 0;\n\n// Strict API Contract & Batch Validation:\n// Accept a batch response ONLY when:\n// 1. success === true\n// 2. processed_count is a finite, non-negative integer\n// 3. no HTTP/API/item failure is present\n// Treat {}, missing success, missing processed_count, null, strings, negative numbers and invalid numeric values as malformed failures.\nlet isBatchValid = false;\nlet failureReason = '';\n\nif (!validatedState.should_submit_batch) {\n  failureReason = 'Batch submission skipped due to previous validation or fetch failure';\n} else if (!batchRes || typeof batchRes !== 'object' || Array.isArray(batchRes)) {\n  failureReason = 'Malformed batch response: payload is null, primitive, or not an object';\n} else if (batchRes.error !== undefined) {\n  const errText = (typeof batchRes.error === 'string' ? batchRes.error : batchRes.error?.message) || JSON.stringify(batchRes.error);\n  failureReason = 'Batch HTTP/API error: ' + errText;\n} else if (typeof batchRes.statusCode === 'number' && batchRes.statusCode >= 400) {\n  failureReason = 'Batch HTTP error with status ' + batchRes.statusCode;\n} else if (batchRes.success !== true) {\n  failureReason = 'Malformed batch response: success must be true (received ' + String(batchRes.success) + ')';\n} else if (\n  typeof batchRes.processed_count !== 'number' ||\n  !Number.isFinite(batchRes.processed_count) ||\n  !Number.isInteger(batchRes.processed_count) ||\n  batchRes.processed_count < 0\n) {\n  failureReason = 'Malformed batch response: processed_count must be a finite, non-negative integer (received ' + String(batchRes.processed_count) + ')';\n} else if (typeof batchRes.error_count === 'number' && batchRes.error_count > 0) {\n  const errMsgs = Array.isArray(batchRes.errors) ? batchRes.errors.map(e => (typeof e === 'object' && e !== null) ? (e.message || JSON.stringify(e)) : String(e)).join('; ') : '';\n  failureReason = 'Batch reported item errors (count: ' + batchRes.error_count + '): ' + (errMsgs || 'unspecified item error');\n} else if (Array.isArray(batchRes.errors) && batchRes.errors.length > 0) {\n  const errMsgs = batchRes.errors.map(e => (typeof e === 'object' && e !== null) ? (e.message || JSON.stringify(e)) : String(e)).join('; ');\n  failureReason = 'Batch returned non-empty errors array: ' + errMsgs;\n} else if (batchRes.status === 'failed' || batchRes.status === 'partial_failed') {\n  failureReason = 'Batch returned degraded status: ' + batchRes.status;\n} else {\n  isBatchValid = true;\n}\n\nif (!isBatchValid) {\n  status = (status === 'failed') ? 'failed' : 'partial_failed';\n  errorDetails.push({\n    stage: 'orders_batch',\n    page,\n    message: 'Batch failure on orders page ' + page + ': ' + failureReason,\n    timestamp: new Date().toISOString()\n  });\n\n  // Preserve the failed page for retry; never advance its checkpoint!\n  orderCheckpoint = {\n    resource: 'orders',\n    next_page: page,\n    last_page_synced: page > 1 ? page - 1 : 0,\n    has_outstanding: true,\n    timestamp: new Date().toISOString()\n  };\n  loopNext = false;\n} else {\n  // Successful and validated batch submission\n  ordersSynced += batchRes.processed_count;\n  pagesProcessed += 1;\n\n  const reachedLimit = pagesProcessed >= maxPages;\n  const hasOutstandingData = hasNextPage && reachedLimit;\n  const shouldContinue = hasNextPage && !reachedLimit && !validatedState.is_fatal_error;\n\n  if (hasOutstandingData) {\n    status = (status === 'failed') ? 'failed' : 'partial_failed';\n    orderCheckpoint = {\n      resource: 'orders',\n      next_page: page + 1,\n      last_page_synced: page,\n      has_outstanding: true,\n      timestamp: new Date().toISOString()\n    };\n  } else if (!hasNextPage) {\n    orderCheckpoint = {\n      resource: 'orders',\n      has_outstanding: false\n    };\n  }\n\n  loopNext = shouldContinue;\n}\n\nconst nextTargetPage = (loopNext && !orderCheckpoint.has_outstanding) ? page + 1 : page;\n\nreturn [{\n  json: {\n    ...validatedState,\n    page: nextTargetPage,\n    orders_synced: ordersSynced,\n    orders_pages_processed: pagesProcessed,\n    error_details: errorDetails,\n    errors_count: errorDetails.length,\n    status,\n    loop_next: loopNext,\n    order_checkpoint: orderCheckpoint,\n    has_outstanding_orders: Boolean(orderCheckpoint?.has_outstanding)\n  }\n}];"
+      },
+      "id": "node-cs-advance-orders",
+      "name": "CS Code: Advance Orders Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5480,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-more-orders",
+              "leftValue": "={{ $json.loop_next }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-cs-if-more-orders",
+      "name": "CS If: More Orders?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.first().json;\n\nlet finalStatus = state.status || 'completed';\nconst errorDetails = Array.isArray(state.error_details) ? [...state.error_details] : [];\n\nconst hasOutstandingProducts = Boolean(state.product_checkpoint?.has_outstanding || state.has_outstanding_products);\nconst hasOutstandingOrders = Boolean(state.order_checkpoint?.has_outstanding || state.has_outstanding_orders);\n\nif (state.errors_count > 0 || errorDetails.length > 0 || hasOutstandingProducts || hasOutstandingOrders) {\n  if (finalStatus !== 'failed') {\n    finalStatus = 'partial_failed';\n  }\n}\n\n// Build clean checkpoint: remove stale next_page / outstanding flags from prior syncs\nconst baseCheckpoint = { ...(state.checkpoint || {}) };\ndelete baseCheckpoint.products_next_page;\ndelete baseCheckpoint.products_outstanding;\ndelete baseCheckpoint.orders_next_page;\ndelete baseCheckpoint.orders_outstanding;\n\nconst checkpoint = {\n  ...baseCheckpoint,\n  last_synced_at: new Date().toISOString(),\n  products_synced: state.products_synced || 0,\n  orders_synced: state.orders_synced || 0\n};\n\n// Only attach next_page if this run left outstanding data for that resource\nif (hasOutstandingProducts && state.product_checkpoint?.next_page) {\n  checkpoint.products_next_page = state.product_checkpoint.next_page;\n  checkpoint.products_outstanding = true;\n}\n\nif (hasOutstandingOrders && state.order_checkpoint?.next_page) {\n  checkpoint.orders_next_page = state.order_checkpoint.next_page;\n  checkpoint.orders_outstanding = true;\n}\n\nconst hasOutstandingData = Boolean(hasOutstandingProducts || hasOutstandingOrders);\n\nreturn [{\n  json: {\n    ...state,\n    job_id: state.job_id,\n    tenant_id: state.tenant_id,\n    connection_id: state.connection_id,\n    status: finalStatus,\n    checkpoint: checkpoint,\n    summary: {\n      products_synced: state.products_synced || 0,\n      orders_synced: state.orders_synced || 0,\n      pages_synced: (state.page || 1),\n      checkpoint: checkpoint,\n      has_outstanding_data: hasOutstandingData\n    },\n    error_details: errorDetails\n  }\n}];"
+      },
+      "id": "node-cs-prepare-finish",
+      "name": "CS Code: Prepare Finish Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5960,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/custom-store/sync/finish",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.job_id }}\",\n  \"status\": \"{{ $json.status }}\",\n  \"summary\": {{ JSON.stringify($json.summary) }},\n  \"error_details\": {{ JSON.stringify($json.error_details || []) }},\n  \"checkpoint\": {{ JSON.stringify($json.checkpoint || {}) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cs-finish-job",
+      "name": "CS HTTP: Finish Sync Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6200,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const finishRes = $input.first().json;\nconst finishReq = $('CS Code: Prepare Finish Job').first().json;\nconst connState = $('CS Code: Pick Current Connection').first().json;\n\nconst connIdx = finishReq.connection_index ?? connState.connection_index ?? 0;\nconst totalConns = finishReq.total_connections ?? connState.total_connections ?? (finishReq.connections?.length || 1);\n\n// Detect HTTP errors, response.error, network failure, or malformed Finish responses\nconst isFinishHttpError = Boolean(!finishRes || finishRes.error || finishRes.statusCode >= 400 || finishRes.success === false);\nconst hasValidJobPayload = Boolean(finishRes && finishRes.job && typeof finishRes.job === 'object' && typeof finishRes.job.status === 'string');\nconst isFinishFailed = isFinishHttpError || !hasValidJobPayload;\n\n// Verify persisted backend status before reporting completion\nlet effectiveStatus = finishReq.status || 'completed';\nif (isFinishFailed) {\n  effectiveStatus = (effectiveStatus === 'completed') ? 'failed' : effectiveStatus;\n} else {\n  const persistedStatus = finishRes.job.status;\n  if (persistedStatus === 'failed' || persistedStatus === 'partial_failed') {\n    effectiveStatus = persistedStatus;\n  } else if (effectiveStatus !== 'completed') {\n    // Retain failed/partial if the workflow itself registered errors\n    effectiveStatus = effectiveStatus;\n  } else if (persistedStatus !== 'completed') {\n    effectiveStatus = 'failed';\n  }\n}\n\nconst isFailed = (effectiveStatus === 'failed' || effectiveStatus === 'partial_failed' || isFinishFailed);\n\nconst connResult = {\n  connection_id: finishReq.connection_id,\n  store_name: finishReq.store_name,\n  job_id: finishReq.job_id,\n  status: effectiveStatus,\n  products_synced: finishReq.summary?.products_synced || 0,\n  orders_synced: finishReq.summary?.orders_synced || 0,\n  errors_count: (finishReq.error_details || []).length + (isFinishFailed ? 1 : 0),\n  has_outstanding_data: Boolean(finishReq.summary?.has_outstanding_data),\n  finish_api_failed: isFinishFailed\n};\n\nconst updatedResults = [...(finishReq.overall_results || connState.overall_results || []), connResult];\nconst updatedFailed = Boolean(finishReq.overall_has_failures || connState.overall_has_failures || isFailed);\nconst nextIdx = connIdx + 1;\nconst hasMore = nextIdx < totalConns;\n\nreturn [{\n  json: {\n    ...finishReq,\n    connection_index: nextIdx,\n    overall_results: updatedResults,\n    overall_has_failures: updatedFailed,\n    loop_more_connections: hasMore\n  }\n}];"
+      },
+      "id": "node-cs-advance-connection",
+      "name": "CS Code: Advance Connection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6440,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-more-connections",
+              "leftValue": "={{ $json.loop_more_connections }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-cs-if-more-connections",
+      "name": "CS If: More Connections?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        6680,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.first().json;\nconst results = state.overall_results || [];\nconst hasFailures = state.overall_has_failures;\n\nconsole.log('[Custom Store Orchestration COMPLETE] Synced ' + results.length + ' connection(s). Has failures: ' + hasFailures);\n\nif (hasFailures) {\n  const failedConns = results.filter(r => r.status === 'failed' || r.status === 'partial_failed');\n  const msg = 'Orchestration completed with ' + failedConns.length + ' failed/partial connection(s): ' + failedConns.map(c => c.connection_id + ' [' + c.status + ']').join(', ');\n  console.warn(msg);\n  throw new Error(msg);\n}\n\nreturn [{\n  json: {\n    success: true,\n    status: 'completed',\n    total_connections_synced: results.length,\n    results\n  }\n}];"
+      },
+      "id": "node-cs-final-summary",
+      "name": "CS Code: Final Orchestration Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6920,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://host.docker.internal:3000/api/custom-store/sync/sandbox-scope",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-cs-fetch-scope",
+      "name": "CS HTTP: Fetch Sandbox Scope Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        320,
+        340
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "CS Trigger: Schedule Hourly": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Fetch Sandbox Scope Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Trigger: Manual Execution": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Fetch Sandbox Scope Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Config: Store Connection": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Enumerate Active Connections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Enumerate Active Connections": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Resolve Target Connections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Resolve Target Connections": {
+      "main": [
+        [
+          {
+            "node": "CS If: Has Active Connections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS If: Has Active Connections": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Pick Current Connection",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CS Code: Handle Enum Failure Or Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Pick Current Connection": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Start Sync Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Start Sync Job": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Init Products Pagination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Init Products Pagination": {
+      "main": [
+        [
+          {
+            "node": "CS If: Should Fetch Products?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS If: Should Fetch Products?": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Prepare Products Page Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CS Code: Prepare Finish Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Prepare Products Page Request": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Fetch Products Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Fetch Products Page": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Validate Products Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Validate Products Page": {
+      "main": [
+        [
+          {
+            "node": "CS If: Submit Products Batch?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS If: Submit Products Batch?": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Submit Products Batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CS Code: Advance Products Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Submit Products Batch": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Advance Products Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Advance Products Page": {
+      "main": [
+        [
+          {
+            "node": "CS If: More Products?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS If: More Products?": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Prepare Products Page Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CS Code: Init Orders Pagination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Init Orders Pagination": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Prepare Orders Page Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Prepare Orders Page Request": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Fetch Orders Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Fetch Orders Page": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Validate Orders Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Validate Orders Page": {
+      "main": [
+        [
+          {
+            "node": "CS If: Submit Orders Batch?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS If: Submit Orders Batch?": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Submit Orders Batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CS Code: Advance Orders Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Submit Orders Batch": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Advance Orders Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Advance Orders Page": {
+      "main": [
+        [
+          {
+            "node": "CS If: More Orders?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS If: More Orders?": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Prepare Orders Page Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CS Code: Prepare Finish Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Prepare Finish Job": {
+      "main": [
+        [
+          {
+            "node": "CS HTTP: Finish Sync Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Finish Sync Job": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Advance Connection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS Code: Advance Connection": {
+      "main": [
+        [
+          {
+            "node": "CS If: More Connections?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS If: More Connections?": {
+      "main": [
+        [
+          {
+            "node": "CS Code: Pick Current Connection",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CS Code: Final Orchestration Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CS HTTP: Fetch Sandbox Scope Config": {
+      "main": [
+        [
+          {
+            "node": "CS Config: Store Connection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -3,19 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "build:css": "tailwindcss -i app/input.css -o app/globals.css",
+    "dev": "npm run build:css && next dev",
+    "build": "npm run build:css && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node scripts/test-contracts.mjs && node scripts/test-order-issues.mjs && node scripts/test-order-reconciliation.mjs && node scripts/test-approvals-manual-action-bridge.mjs && node scripts/test-custom-store-connector.mjs"
   },
   "dependencies": {
+    "lucide-react": "^1.51.0",
     "next": "16.3.8",
+    "pg": "^8.23.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

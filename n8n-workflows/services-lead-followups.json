@@ -1,0 +1,732 @@
+{
+  "id": "wf-services-lead-followups",
+  "name": "Industry AI Operator - Services Lead Follow-Up Orchestration",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-trigger",
+      "name": "Schedule (Every 15 Min)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        100,
+        260
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "node-manual-trigger",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        100,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://host.docker.internal:3000/api/services/followup/sandbox-scope",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-fetch-sandbox-scope",
+      "name": "Fetch Sandbox Scope Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        320,
+        360
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Explicit Sandbox Scope & Mock Dispatch Validation\nconst inputData = $input.first()?.json || {};\nconst scopeTenant = inputData.sandbox_tenant_id || inputData.tenant_id;\n\n// 1. Missing sandbox scope check:\n// Execution fails immediately before any database mutation or claim call\nif (!scopeTenant || typeof scopeTenant !== 'string' || !scopeTenant.trim()) {\n  throw new Error(\"Missing explicit sandbox tenant scope: A validated sandbox tenant_id (e.g. 'sandbox-services-alpha') is strictly required before claiming test jobs. Never fall back to claiming all tenants.\");\n}\n\nconst cleanTenant = scopeTenant.trim();\n\n// 2. Unauthorized scope check:\n// Only sandbox or test tenants are authorized for sandbox testing\nif (!cleanTenant.startsWith('sandbox-') && !cleanTenant.startsWith('test-')) {\n  throw new Error(`Unauthorized sandbox scope: '${cleanTenant}' is not an authorized sandbox business workspace. Sandbox tests must target 'sandbox-*' or 'test-*' tenants.`);\n}\n\nconst isMock = inputData.mock !== undefined ? Boolean(inputData.mock) : true;\n\nreturn [{\n  json: {\n    ...inputData,\n    sandbox_mode: true,\n    tenant_id: cleanTenant,\n    mock: isMock,\n    claim_limit: inputData.limit || 10\n  }\n}];"
+      },
+      "id": "node-sandbox-scope",
+      "name": "Validate Sandbox Scope & Mock Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        540,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/services/followup/claim",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"limit\": {{ $json.claim_limit || 10 }},\n  \"worker_id\": \"n8n_services_orchestrator\",\n  \"tenant_id\": {{ JSON.stringify($json.tenant_id) }},\n  \"sandbox_mode\": true,\n  \"mock\": {{ $json.mock ? true : false }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-claim-jobs",
+      "name": "Claim Due Services Follow-up Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        360
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-has-claimed-jobs",
+              "leftValue": "={{ Array.isArray($json.claimed_jobs) && $json.claimed_jobs.length > 0 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-has-jobs-if",
+      "name": "Has Claimed Jobs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1020,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log zero jobs found\nconst result = $input.first().json;\nconsole.log('[Services Follow-up] Zero due follow-up jobs claimed. Polling cycle complete.');\nreturn [{\n  json: {\n    status: 'idle',\n    claimed_count: 0,\n    message: 'Zero due follow-up jobs claimed.'\n  }\n}];"
+      },
+      "id": "node-zero-jobs-log",
+      "name": "Log Zero Due Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "claimed_jobs",
+        "options": {}
+      },
+      "id": "node-split-jobs",
+      "name": "Split Claimed Jobs",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3,
+      "position": [
+        1260,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare normalized inspection parameters\nconst items = $input.all();\nconst scopeCfg = $('Validate Sandbox Scope & Mock Config').first()?.json || {};\n\nreturn items.map(entry => {\n  const item = entry.json;\n  return {\n    json: {\n      tenant_id: item.tenant_id,\n      lead_id: item.lead_id,\n      job_id: item.id,\n      attempt_count: item.attempt_count || 0,\n      max_attempts: item.max_attempts || 2,\n      mock: scopeCfg.mock !== undefined ? scopeCfg.mock : true\n    }\n  };\n});"
+      },
+      "id": "node-prepare-inspection",
+      "name": "Prepare Lead Inspection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/services/followup/inspect",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"tenant_id\": \"{{ $json.tenant_id }}\",\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"job_id\": \"{{ $json.job_id }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-inspect-lead",
+      "name": "Inspect Lead State & Permitted Path",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1700,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Preserve tenant_id, lead_id, job_id and validate business inspection response\nconst items = $input.all();\nconst prepItems = $('Prepare Lead Inspection').all();\n\nreturn items.map((entry, idx) => {\n  const inspectRes = entry.json || {};\n  const prep = prepItems[idx]?.json || {};\n\n  const tenantId = inspectRes.tenant_id || prep.tenant_id;\n  const leadId = inspectRes.lead_id || prep.lead_id;\n  const jobId = inspectRes.job_id || prep.job_id;\n\n  let permittedPath = inspectRes.permitted_path || inspectRes.action;\n  const isValidPath = permittedPath === 'customer_followup' || permittedPath === 'owner_task_escalation' || permittedPath === 'cancel_obsolete';\n\n  const isHttpError = Boolean(inspectRes.error || inspectRes.statusCode >= 400 || inspectRes.success === false);\n\n  if (isHttpError || !isValidPath) {\n    permittedPath = 'unknown_failure';\n  }\n\n  return {\n    json: {\n      ...inspectRes,\n      tenant_id: tenantId,\n      lead_id: leadId,\n      job_id: jobId,\n      mock: prep.mock !== undefined ? prep.mock : true,\n      permitted_path: permittedPath,\n      inspection_valid: isValidPath && !isHttpError\n    }\n  };\n});"
+      },
+      "id": "node-preserve-context",
+      "name": "Preserve Context & Validate Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.permitted_path }}",
+                    "rightValue": "customer_followup",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.permitted_path }}",
+                    "rightValue": "owner_task_escalation",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.permitted_path }}",
+                    "rightValue": "cancel_obsolete",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "node-switch-path",
+      "name": "Choose Permitted Path",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        2160,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/services/followup/dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"tenant_id\": \"{{ $json.tenant_id }}\",\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"job_id\": \"{{ $json.job_id }}\",\n  \"mock\": {{ $json.mock ? true : false }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-dispatch-followup",
+      "name": "Dispatch Customer Follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2440,
+        100
+      ],
+      "retryOnFail": false,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/services/followup/escalate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"tenant_id\": \"{{ $json.tenant_id }}\",\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"job_id\": \"{{ $json.job_id }}\",\n  \"reason\": \"{{ $json.reason || 'Max follow-up attempts reached without customer reply' }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-escalate-task",
+      "name": "Escalate to Owner Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2440,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/services/followup/cancel",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"tenant_id\": \"{{ $json.tenant_id }}\",\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"job_id\": \"{{ $json.job_id }}\",\n  \"reason\": \"{{ $json.reason || 'Follow-up rendered obsolete due to customer reply, lead closure, or manual takeover' }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-cancel-job",
+      "name": "Cancel Obsolete Follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2440,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Explicit failure handler for unknown orchestration path or invalid inspection\nconst items = $input.all();\nreturn items.map(entry => {\n  const item = entry.json;\n  console.error('[Services Followup Failure] Unknown permitted path or inspection failed:', item);\n  return {\n    json: {\n      ...item,\n      action_success: false,\n      outcome: 'unknown_path_failed',\n      error_message: `Unrecognized or invalid orchestration path: ${item.permitted_path || 'null'}`\n    }\n  };\n});"
+      },
+      "id": "node-unknown-path-failure",
+      "name": "Handle Unknown Path Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Business-response validation: verify that the branch action succeeded\nconst items = $input.all();\nconst contextItems = $('Preserve Context & Validate Response').all();\n\nreturn items.map((entry, idx) => {\n  const actionRes = entry.json || {};\n  const context = contextItems[idx]?.json || {};\n\n  const tenantId = actionRes.tenant_id || context.tenant_id;\n  const leadId = actionRes.lead_id || context.lead_id;\n  const jobId = actionRes.job_id || context.job_id;\n\n  const isSuccess = Boolean(actionRes && actionRes.success === true);\n  const isMalformed = !actionRes || typeof actionRes !== 'object' || Array.isArray(actionRes) ||\n    (actionRes.success === undefined && actionRes.error === undefined && !actionRes.status && !actionRes.dispatched && !actionRes.task_id && !actionRes.cancelled);\n\n  let branchOutcome = 'action_execution_failed';\n  if (isMalformed) {\n    branchOutcome = 'malformed_response';\n  } else if (actionRes.status === 'dispatched_simulated' || actionRes.dispatched) {\n    branchOutcome = 'dispatched';\n  } else if (actionRes.task_id || actionRes.escalated) {\n    branchOutcome = 'escalated_to_owner';\n  } else if (actionRes.cancelled || actionRes.message?.includes('cancelled') || actionRes.reason?.includes('obsolete')) {\n    branchOutcome = 'cancelled';\n  } else if (actionRes.outcome === 'unknown_path_failed' || actionRes.action_success === false) {\n    branchOutcome = 'unknown_path_failed';\n  } else if (isSuccess) {\n    branchOutcome = 'completed';\n  }\n\n  return {\n    json: {\n      ...actionRes,\n      tenant_id: tenantId,\n      lead_id: leadId,\n      job_id: jobId,\n      outcome: branchOutcome,\n      action_succeeded: isSuccess && branchOutcome !== 'unknown_path_failed' && branchOutcome !== 'action_execution_failed' && branchOutcome !== 'malformed_response',\n      summary_details: actionRes\n    }\n  };\n});"
+      },
+      "id": "node-validate-action",
+      "name": "Validate Action Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/services/followup/complete",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.job_id }}\",\n  \"tenant_id\": \"{{ $json.tenant_id }}\",\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"outcome\": \"{{ $json.outcome }}\",\n  \"details\": {{ JSON.stringify($json.summary_details || {}) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "node-record-outcome",
+      "name": "Record Job Outcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2980,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Strict validation of /complete response and enforcement of business outcome status\nconst items = $input.all();\nconst validatedItems = $('Validate Action Response').all();\nconst failedItems = [];\n\nfor (let idx = 0; idx < items.length; idx++) {\n  const completeRes = items[idx]?.json || {};\n  const validated = validatedItems[idx]?.json || {};\n\n  // Preserve tenant_id, lead_id, job_id across /complete HTTP response\n  const tenantId = completeRes.tenant_id || validated.tenant_id;\n  const leadId = completeRes.lead_id || validated.lead_id;\n  const jobId = completeRes.job_id || validated.job_id;\n  const actionOutcome = validated.outcome;\n  const actionSucceeded = validated.action_succeeded;\n\n  // 1. Strict validation of /complete response:\n  // Missing success or missing outcome MUST NOT silently pass!\n  const completeValid = completeRes && completeRes.success === true && typeof completeRes.outcome === 'string' && completeRes.outcome.trim() !== '';\n  if (!completeValid) {\n    failedItems.push({\n      tenant_id: tenantId,\n      lead_id: leadId,\n      job_id: jobId,\n      outcome: 'complete_response_invalid',\n      reason: completeRes.error || (completeRes.success === undefined ? 'Missing success field in /complete response' : 'Missing or invalid outcome field in /complete response'),\n      complete_response: completeRes,\n    });\n    continue;\n  }\n\n  // 2. Check if business action failed or encountered unknown/failed outcome\n  if (\n    actionOutcome === 'unknown_path_failed' ||\n    actionOutcome === 'action_execution_failed' ||\n    actionOutcome === 'malformed_response' ||\n    actionOutcome === 'inspect_failed' ||\n    actionSucceeded === false ||\n    validated.success === false\n  ) {\n    failedItems.push({\n      tenant_id: tenantId,\n      lead_id: leadId,\n      job_id: jobId,\n      outcome: actionOutcome || completeRes.outcome,\n      reason: validated.error_message || validated.reason || validated.error || 'Business action failure',\n    });\n  }\n}\n\nif (failedItems.length > 0) {\n  const firstFail = failedItems[0];\n  const summaryMsg = `Services follow-up orchestration failed for ${failedItems.length} job(s). First failure: tenant='${firstFail.tenant_id}', lead='${firstFail.lead_id}', job='${firstFail.job_id}', outcome='${firstFail.outcome}', reason='${firstFail.reason}'`;\n  console.error('[Services Orchestration Execution Failure]', summaryMsg, JSON.stringify(failedItems));\n  throw new Error(summaryMsg);\n}\n\nreturn items;"
+      },
+      "id": "node-enforce-execution-status",
+      "name": "Enforce Business Outcome Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3240,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule (Every 15 Min)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Sandbox Scope Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Sandbox Scope Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Sandbox Scope Config": {
+      "main": [
+        [
+          {
+            "node": "Validate Sandbox Scope & Mock Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Sandbox Scope & Mock Config": {
+      "main": [
+        [
+          {
+            "node": "Claim Due Services Follow-up Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Due Services Follow-up Jobs": {
+      "main": [
+        [
+          {
+            "node": "Has Claimed Jobs?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Claimed Jobs?": {
+      "main": [
+        [
+          {
+            "node": "Split Claimed Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Zero Due Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Claimed Jobs": {
+      "main": [
+        [
+          {
+            "node": "Prepare Lead Inspection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Lead Inspection": {
+      "main": [
+        [
+          {
+            "node": "Inspect Lead State & Permitted Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inspect Lead State & Permitted Path": {
+      "main": [
+        [
+          {
+            "node": "Preserve Context & Validate Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preserve Context & Validate Response": {
+      "main": [
+        [
+          {
+            "node": "Choose Permitted Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Choose Permitted Path": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Customer Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Escalate to Owner Task",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cancel Obsolete Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Unknown Path Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch Customer Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Validate Action Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate to Owner Task": {
+      "main": [
+        [
+          {
+            "node": "Validate Action Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel Obsolete Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Validate Action Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Unknown Path Failure": {
+      "main": [
+        [
+          {
+            "node": "Validate Action Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Action Response": {
+      "main": [
+        [
+          {
+            "node": "Record Job Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Job Outcome": {
+      "main": [
+        [
+          {
+            "node": "Enforce Business Outcome Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,268 @@
+{
+  "id": "wf-social-media-autopilot",
+  "name": "Industry AI Operator - Social Media Autopilot Orchestration",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "social-schedule-trigger",
+      "name": "Schedule (Every 15 Min)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        100,
+        340
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "social-manual-trigger",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        100,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/social/jobs/generate-scheduled",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "social-prepare-content",
+      "name": "[Social Media] Prepare Scheduled Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        340,
+        340
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/social/jobs/claim",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"limit\": 10,\n  \"worker_id\": \"n8n_social_media_worker\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "social-claim-jobs",
+      "name": "[Social Media] Claim Due Publishing Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        340
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first()?.json || {};\nconst jobs = Array.isArray(res.jobs) ? res.jobs : [];\n\nif (jobs.length === 0) {\n  return [{ json: { has_jobs: false, message: 'No due publishing jobs in queue' } }];\n}\n\nreturn jobs.map(job => ({\n  json: {\n    has_jobs: true,\n    ...job\n  }\n}));"
+      },
+      "id": "social-split-jobs",
+      "name": "[Social Media] Split Claimed Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_jobs }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "social-filter-has-jobs",
+      "name": "[Social Media] Filter Active Jobs",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1020,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/social/jobs/dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": {{ JSON.stringify($json.id) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "social-dispatch-job",
+      "name": "[Social Media] Dispatch Publishing Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1240,
+        280
+      ],
+      "retryOnFail": false,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "h2AiwQQc0Q82QoEJ",
+          "name": "IAO Working Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.first()?.json || {};\nreturn [{\n  json: {\n    job_id: result.job?.id,\n    post_id: result.job?.post_id,\n    platform: result.job?.platform,\n    status: result.status,\n    is_simulated: result.is_simulated,\n    provider_post_id: result.provider_post_id,\n    provider_post_url: result.provider_post_url,\n    dispatched_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "social-record-outcome",
+      "name": "[Social Media] Record Publishing Outcome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1460,
+        280
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule (Every 15 Min)": {
+      "main": [
+        [
+          {
+            "node": "[Social Media] Prepare Scheduled Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "[Social Media] Prepare Scheduled Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[Social Media] Prepare Scheduled Content": {
+      "main": [
+        [
+          {
+            "node": "[Social Media] Claim Due Publishing Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[Social Media] Claim Due Publishing Jobs": {
+      "main": [
+        [
+          {
+            "node": "[Social Media] Split Claimed Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[Social Media] Split Claimed Jobs": {
+      "main": [
+        [
+          {
+            "node": "[Social Media] Filter Active Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[Social Media] Filter Active Jobs": {
+      "main": [
+        [
+          {
+            "node": "[Social Media] Dispatch Publishing Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[Social Media] Dispatch Publishing Job": {
+      "main": [
+        [
+          {
+            "node": "[Social Media] Record Publishing Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
